@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+# Batch-Dateien brauchen unter Windows CRLF
+*.bat text eol=crlf
+
+*.ico binary
+*.png binary
+*.exe binary

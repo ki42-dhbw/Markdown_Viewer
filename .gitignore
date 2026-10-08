@@ -1,0 +1,27 @@
+# PyInstaller-Ausgabe – die .exe gehört in ein GitHub-Release, nicht ins Repository
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Lokale Arbeits- und Testdateien (fremde Inhalte, eigene Notizen)
+test/
+Testdaten/*
+!Testdaten/Beispiel.md
+!Testdaten/Beispiel.ipynb
+
+# Schlüssel und lokale Einstellungen
+.env
+.env.*
+.claude/
+
+# Editor / Betriebssystem
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
