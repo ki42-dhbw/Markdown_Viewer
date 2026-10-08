@@ -2586,6 +2586,17 @@ window.addEventListener('beforeunload', e => {
   }
 });
 
+// An- und Abmelden beim Server: Er beendet sich, sobald keine Seite mehr offen ist.
+// pageshow/pagehide statt load/unload – sie feuern auch beim Zurückblättern.
+const CLIENT_ID = Date.now().toString(36) + Math.random().toString(36).slice(2);
+function announce(route) {
+  const body = JSON.stringify({ id: CLIENT_ID });
+  if (navigator.sendBeacon && navigator.sendBeacon(route, body)) return;
+  fetch(route, { method: 'POST', body, keepalive: true }).catch(() => {});
+}
+window.addEventListener('pageshow', () => announce('/api/hello'));
+window.addEventListener('pagehide', () => announce('/api/bye'));
+
 renderShotList();
 loadServerStatus();
 
@@ -3441,12 +3452,57 @@ def request_save_path(timeout=600):
     return result
 
 
+# ── Beenden mit dem letzten Fenster ───────────────────────────────────
+# Jede offene Seite meldet sich mit einer eigenen Kennung an und beim Schliessen
+# wieder ab. Ist keine mehr uebrig, beendet sich der Server nach einer kurzen
+# Frist - sie ueberbrueckt das Neuladen, bei dem sich die Seite ab- und gleich
+# wieder anmeldet. Bewusst ohne Herzschlag: Browser frieren Hintergrund-Tabs ein,
+# und ein ausbleibendes Signal wuerde den Server unter einem offenen Tab wegziehen.
+QUIT_GRACE = 5.0                   # Sekunden zwischen letzter Abmeldung und Ende
+_clients = set()
+_clients_lock = threading.Lock()
+_quit_at = None
+
+
+def client_hello(client_id):
+    global _quit_at
+    with _clients_lock:
+        _clients.add(client_id)
+        _quit_at = None
+
+
+def client_bye(client_id):
+    global _quit_at
+    with _clients_lock:
+        _clients.discard(client_id)
+        if not _clients:
+            _quit_at = time.monotonic() + QUIT_GRACE
+
+
+def page_requested():
+    """Eine Seite wird gerade geladen - ein anstehendes Ende ist damit hinfaellig."""
+    global _quit_at
+    with _clients_lock:
+        _quit_at = None
+
+
+def should_quit():
+    with _clients_lock:
+        return (_quit_at is not None and not _clients
+                and time.monotonic() >= _quit_at)
+
+
 def pump_dialogs():
-    """Bedient im Hauptthread die Dialoganfragen der Server-Threads."""
+    """Bedient im Hauptthread die Dialoganfragen der Server-Threads.
+
+    Kehrt zurueck, sobald das letzte Fenster geschlossen wurde.
+    """
     while True:
         try:
             answer = _dialog_requests.get(timeout=0.25)
         except queue.Empty:
+            if should_quit():
+                return
             continue
         try:
             answer.put(ask_save_path())
@@ -3464,6 +3520,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
 
         if parsed.path == "/" or parsed.path == "/index.html":
+            page_requested()
             self._send(200, "text/html; charset=utf-8", HTML.encode())
 
         elif parsed.path == "/api/status":
@@ -3514,6 +3571,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_import(data)
         elif parsed.path == "/api/save":
             self._handle_save(data)
+        elif parsed.path == "/api/hello":
+            client_hello(str(data.get("id", "")))
+            self._json(200, {"ok": True})
+        elif parsed.path == "/api/bye":
+            client_bye(str(data.get("id", "")))
+            self._json(200, {"ok": True})
         else:
             self._json(404, {"error": "Unbekannte Route"})
 
@@ -3623,7 +3686,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Mehrere Threads, damit eine laufende Umwandlung die Oberflaeche nicht blockiert."""
     daemon_threads = True
-    allow_reuse_address = True
+    # Unter Windows erlaubt SO_REUSEADDR mehreren Prozessen denselben Port -
+    # jeder weitere Start liefe dann unbemerkt als zweite Instanz mit.
+    allow_reuse_address = os.name != "nt"
 
 
 def start_server():
@@ -3633,21 +3698,64 @@ def start_server():
     return server
 
 
+def viewer_running():
+    """Ob auf dem Port bereits ein Markdown Viewer antwortet."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{PORT}/api/status", timeout=1.5) as r:
+            return "local_ocr" in json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return False
+
+
+def show_error(text):
+    """Meldet einen Startfehler - die .exe hat keine Konsole."""
+    print(text)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Markdown Viewer", text)
+        root.destroy()
+    except Exception:
+        pass
+
+
 def main():
-    print(f"Markdown Viewer startet auf http://127.0.0.1:{PORT}")
+    url = f"http://127.0.0.1:{PORT}"
+    # Laeuft schon ein Viewer, bekommt er nur ein weiteres Fenster.
+    if viewer_running():
+        print(f"Markdown Viewer laeuft bereits - oeffne {url}")
+        webbrowser.open(url)
+        return
+    try:
+        server = start_server()
+    except OSError:
+        # Zwei Starts fast gleichzeitig: der andere war beim Belegen schneller.
+        time.sleep(1.0)
+        if viewer_running():
+            webbrowser.open(url)
+        else:
+            show_error(f"Port {PORT} ist von einem anderen Programm belegt - "
+                       "der Markdown Viewer kann nicht starten.")
+        return
+    print(f"Markdown Viewer startet auf {url}")
     if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         print("Hinweis: ANTHROPIC_API_KEY ist nicht gesetzt - "
               "'Screenshots/Text -> Markdown' laeuft lokal ueber die Windows-Texterkennung.")
     if not local_ocr_available():
         print("Hinweis: Lokale Windows-Texterkennung nicht verfuegbar "
               "(nur Windows mit PowerShell 5.1).")
-    start_server()
-    webbrowser.open(f"http://127.0.0.1:{PORT}")
-    print("Browser geöffnet. Strg+C zum Beenden.")
+    webbrowser.open(url)
+    print("Browser geöffnet. Beendet sich mit dem letzten Fenster – oder mit Strg+C.")
     try:
         pump_dialogs()   # haelt den Hauptthread und bedient Tk-Dialoge
+        print("Letztes Fenster geschlossen - Server beendet.")
     except KeyboardInterrupt:
         print("\nServer beendet.")
+    server.shutdown()
+    server.server_close()
 
 
 if __name__ == "__main__":

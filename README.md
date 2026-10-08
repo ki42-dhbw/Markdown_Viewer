@@ -45,7 +45,11 @@ python Markdown_Viewer_webapp_01.py
 ```
 
 oder per Doppelklick auf `start.bat`. Das Programm startet einen kleinen Server auf
-`http://127.0.0.1:8742` und öffnet die Seite im Browser. Beenden mit `Strg+C`.
+`http://127.0.0.1:8742` und öffnet die Seite im Browser.
+
+Der Viewer beendet sich von selbst, wenige Sekunden nachdem der letzte Tab mit der
+Seite geschlossen wurde. Ein erneuter Start, während er noch läuft, öffnet nur ein
+weiteres Fenster auf dieselbe Instanz.
 
 Zum Ausprobieren liegen in `Testdaten/` ein Beispieldokument und ein Beispiel-Notebook.
 
