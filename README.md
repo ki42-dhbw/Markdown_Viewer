@@ -33,6 +33,13 @@ zusätzlichen Pakete**.
 
 ## Starten
 
+Am einfachsten: `MarkdownViewer.exe` von der
+[Release-Seite](https://github.com/ki42-dhbw/Markdown_Viewer/releases/latest)
+herunterladen und starten – Python ist dafür nicht nötig. Die Datei ist nicht
+signiert, Windows SmartScreen fragt beim ersten Start deshalb nach.
+
+Mit Python:
+
 ```powershell
 python Markdown_Viewer_webapp_01.py
 ```
