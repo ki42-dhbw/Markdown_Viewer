@@ -26,6 +26,10 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 from urllib.request import url2pathname
 
+# Versionsnummer der Anwendung - erscheint in der Werkzeugleiste und in /api/status.
+# Bei jeder veroeffentlichten Aenderung erhoehen, passend zum GitHub-Release.
+APP_VERSION = "1.1"
+
 PORT = 8742
 BASE_DIR = Path(__file__).parent
 
@@ -82,11 +86,18 @@ HTML = r"""<!DOCTYPE html>
   <meta name="referrer" content="no-referrer">
   <title>Markdown Viewer</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Syntax-Hervorhebung: die gängigen Sprachen plus Julia. Die Farben stehen
+       weiter unten im <style>, damit sie zum Theme und zum Druck passen. -->
+  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/languages/julia.min.js"></script>
   <script>
     window.MathJax = {
       tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
       svg: { fontCache: 'global' },
-      startup: { typeset: false }
+      startup: { typeset: false },
+      // Formeln stammen aus fremden Dateien. ui/safe filtert \href auf
+      // javascript:-Adressen sowie \style, \class und \cssId.
+      loader: { load: ['ui/safe'] }
     };
   </script>
   <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
@@ -130,6 +141,13 @@ HTML = r"""<!DOCTYPE html>
       gap: 8px;
       padding: 8px 16px;
       flex-shrink: 0;
+    }
+
+    .toolbar-version {
+      font-size: 11px;
+      color: var(--muted);
+      margin: 0 8px 0 -6px;
+      user-select: none;
     }
 
     .toolbar-title {
@@ -210,6 +228,18 @@ HTML = r"""<!DOCTYPE html>
     .toc-item.active { border-left-color: var(--accent); color: var(--accent); }
     .toc-item.h2 { padding-left: 28px; font-size: 12px; }
     .toc-item.h3 { padding-left: 40px; font-size: 11px; color: var(--muted); }
+    .toc-item.h4 { padding-left: 52px; font-size: 11px; color: var(--muted); }
+    .toc-item.toc-code { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 11px; color: var(--muted); }
+    .toc-item.toc-error { color: #f48771; }
+    .toc-item.active { color: var(--accent); }
+    .toc-opt {
+      display: block;
+      padding: 0 16px 10px;
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+    }
 
     /* ── Content ── */
     .content-wrap {
@@ -323,7 +353,58 @@ HTML = r"""<!DOCTYPE html>
       background: var(--surface);
     }
     .nb-cell-md { border: none; background: transparent; }
-    .nb-cell-md > .nb-md { padding: 0; }
+    .nb-cell-md .nb-md { padding: 0; }
+    .nb-cell-md { display: flex; gap: 4px; overflow: visible; }
+    .nb-gutter { width: 18px; flex-shrink: 0; }
+    .nb-part-main { flex: 1; min-width: 0; }
+
+    /* Ein- und Ausklappen */
+    .nb-fold {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      width: 16px;
+      padding: 0;
+      margin-right: 2px;
+      line-height: 1;
+    }
+    .nb-fold:hover { color: var(--accent); }
+    .nb-cell-md .nb-fold { margin-top: 0.9em; }
+    .nb-fold-summary {
+      display: none;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 13px;
+      font-style: italic;
+      padding: 3px 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .nb-fold-summary:hover { color: var(--accent); }
+    .nb-part.nb-folded .nb-fold-summary { display: block; }
+    .nb-part.nb-folded .nb-part-body, .nb-part.nb-folded .nb-more { display: none; }
+    .nb-part.nb-folded .nb-copy { display: none; }
+    .nb-part.nb-clamped .nb-part-body {
+      max-height: 20em;
+      overflow: hidden;
+      -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+      mask-image: linear-gradient(to bottom, #000 70%, transparent);
+    }
+    .nb-more {
+      display: block;
+      margin: 6px 0 2px;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--accent);
+      font-size: 12px;
+      padding: 2px 10px;
+      cursor: pointer;
+    }
+    .nb-more:hover { background: rgba(255,255,255,0.05); }
     .nb-md { padding: 12px 16px; }
     .nb-input, .nb-output {
       display: flex;
@@ -335,7 +416,7 @@ HTML = r"""<!DOCTYPE html>
     .nb-output { background: #222; }
     .nb-prompt {
       flex-shrink: 0;
-      width: 70px;
+      width: 86px;
       font-family: 'Cascadia Code', 'Consolas', monospace;
       font-size: 11px;
       color: var(--muted);
@@ -382,6 +463,103 @@ HTML = r"""<!DOCTYPE html>
       font-size: 12px;
     }
     .nb-out-html th { background: var(--surface); color: var(--accent2); }
+    .nb-out-latex { color: var(--text); overflow-x: auto; }
+
+    /* Kopfzeile mit Notebook-Infos und Schaltern */
+    .nb-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 16px;
+      padding: 10px 14px;
+      margin-bottom: 1.2em;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+    .nb-meta { flex: 1; min-width: 240px; font-size: 12px; color: var(--muted); }
+    .nb-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+    .nb-tools .btn { padding: 3px 10px; font-size: 12px; }
+    .nb-tools .btn.active { background: #0e639c; border-color: #0e639c; color: #fff; }
+
+    /* Code-Zellen: Zeilennummern, Kopieren-Knopf */
+    .nb-code-wrap { display: flex; }
+    .nb-code-body pre { line-height: 1.45; }
+    .nb-code-body pre.nb-lineno {
+      display: none;
+      flex-shrink: 0;
+      overflow: visible;
+      padding-right: 12px;
+      margin-right: 12px;
+      border-right: 1px solid var(--border);
+      text-align: right;
+      user-select: none;
+    }
+    .nb-code-body pre.nb-lineno code { color: var(--muted); }
+    .nb-code-body pre.nb-src { flex: 1; min-width: 0; }
+    .nb-doc.show-lines pre.nb-lineno { display: block; }
+    .nb-copy {
+      display: block;
+      margin-top: 6px;
+      background: #3c3c3c;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .nb-input:hover .nb-copy, .nb-copy:focus { opacity: 1; }
+    .nb-copy:hover { color: var(--text); background: #505050; }
+
+    /* Code oder Ausgaben ausblenden – ein Notebook liest sich dann wie ein Bericht */
+    .nb-doc.hide-code .nb-code > .nb-input { display: none; }
+    .nb-doc.hide-code .nb-code > .nb-input + .nb-output { border-top: none; }
+    .nb-doc.hide-code .nb-code.nb-no-out { display: none; }
+    .nb-doc.hide-out .nb-output { display: none; }
+    .nb-doc.hide-code.hide-out .nb-code { display: none; }
+
+    /* Syntax-Hervorhebung (highlight.js), Farben wie im übrigen Theme */
+    .hljs-keyword, .hljs-literal, .hljs-selector-tag, .hljs-doctag { color: #569cd6; }
+    .hljs-built_in, .hljs-type, .hljs-class .hljs-title, .hljs-title.class_ { color: #4ec9b0; }
+    .hljs-string, .hljs-regexp, .hljs-char.escape_ { color: #ce9178; }
+    .hljs-number { color: #b5cea8; }
+    .hljs-comment, .hljs-quote { color: #6a9955; font-style: italic; }
+    .hljs-title, .hljs-title.function_, .hljs-section { color: #dcdcaa; }
+    .hljs-params, .hljs-variable, .hljs-attr, .hljs-property, .hljs-template-variable { color: #9cdcfe; }
+    .hljs-meta, .hljs-meta .hljs-keyword, .hljs-symbol { color: #c586c0; }
+    .hljs-subst { color: var(--text); }
+    .hljs-tag, .hljs-name, .hljs-selector-class, .hljs-selector-id { color: #569cd6; }
+    .hljs-attribute { color: #9cdcfe; }
+    .hljs-addition { color: #b5cea8; }
+    .hljs-deletion { color: #f48771; }
+    .hljs-emphasis { font-style: italic; }
+    .hljs-strong { font-weight: bold; }
+    .markdown-body pre code.hljs { color: var(--text); }
+
+    /* ANSI-Farben aus Terminal-Ausgaben (Tracebacks, Logs) */
+    .ansi-bold { font-weight: bold; }
+    .ansi-dim { opacity: 0.7; }
+    .ansi-italic { font-style: italic; }
+    .ansi-underline { text-decoration: underline; }
+    .ansi-fg-0 { color: #6e6e6e; }  .ansi-bg-0 { background: #000000; }
+    .ansi-fg-1 { color: #f14c4c; }  .ansi-bg-1 { background: #cd3131; }
+    .ansi-fg-2 { color: #23d18b; }  .ansi-bg-2 { background: #0dbc79; }
+    .ansi-fg-3 { color: #e5e510; }  .ansi-bg-3 { background: #a39e0b; }
+    .ansi-fg-4 { color: #3b8eea; }  .ansi-bg-4 { background: #2472c8; }
+    .ansi-fg-5 { color: #d670d6; }  .ansi-bg-5 { background: #bc3fbc; }
+    .ansi-fg-6 { color: #29b8db; }  .ansi-bg-6 { background: #11a8cd; }
+    .ansi-fg-7 { color: #e5e5e5; }  .ansi-bg-7 { background: #808080; }
+    .ansi-fg-8 { color: #8a8a8a; }  .ansi-bg-8 { background: #666666; }
+    .ansi-fg-9 { color: #ff6b6b; }  .ansi-bg-9 { background: #f14c4c; }
+    .ansi-fg-10 { color: #3ee8a0; } .ansi-bg-10 { background: #23d18b; }
+    .ansi-fg-11 { color: #f5f543; } .ansi-bg-11 { background: #b5b512; }
+    .ansi-fg-12 { color: #6aaef5; } .ansi-bg-12 { background: #3b8eea; }
+    .ansi-fg-13 { color: #e58fe5; } .ansi-bg-13 { background: #d670d6; }
+    .ansi-fg-14 { color: #4fd0ee; } .ansi-bg-14 { background: #29b8db; }
+    .ansi-fg-15 { color: #ffffff; } .ansi-bg-15 { background: #a0a0a0; }
 
     /* Scrollbar */
     ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -594,6 +772,37 @@ HTML = r"""<!DOCTYPE html>
       .markdown-body th, .markdown-body td { border-color: #ccc !important; }
       .nb-cell, .nb-input, .nb-output { background: #fafafa !important; border-color: #ddd !important; }
       .nb-out-err { color: #b00 !important; }
+      .nb-out-text, .nb-out-html, .nb-out-latex, .nb-meta { color: #000 !important; }
+      .nb-header { background: #fafafa !important; border-color: #ddd !important; }
+      .nb-tools, .nb-copy { display: none !important; }
+      /* Eingeklapptes und Gekürztes erscheint im Druck vollständig. */
+      .nb-fold, .nb-fold-summary, .nb-more { display: none !important; }
+      .nb-part .nb-part-body {
+        display: block !important;
+        max-height: none !important;
+        overflow: visible !important;
+        -webkit-mask-image: none !important;
+        mask-image: none !important;
+      }
+      .nb-code-body pre.nb-lineno { border-right-color: #ddd !important; }
+      .nb-code-body pre.nb-lineno code { color: #888 !important; }
+      .nb-code-body pre code { color: #000 !important; }
+
+      /* Hervorhebung und ANSI-Farben in Tönen, die auf Papier lesbar sind. */
+      .hljs-keyword, .hljs-literal, .hljs-selector-tag, .hljs-tag, .hljs-name { color: #0000c0 !important; }
+      .hljs-built_in, .hljs-type, .hljs-title.class_ { color: #267f99 !important; }
+      .hljs-string, .hljs-regexp { color: #a31515 !important; }
+      .hljs-number { color: #098658 !important; }
+      .hljs-comment, .hljs-quote { color: #008000 !important; }
+      .hljs-title, .hljs-title.function_, .hljs-section { color: #795e26 !important; }
+      .hljs-params, .hljs-variable, .hljs-attr, .hljs-property, .hljs-attribute { color: #001080 !important; }
+      .hljs-meta, .hljs-symbol { color: #af00db !important; }
+      [class*="ansi-fg-"] { color: #000 !important; }
+      .ansi-fg-1, .ansi-fg-9 { color: #b00 !important; }
+      .ansi-fg-2, .ansi-fg-10 { color: #070 !important; }
+      .ansi-fg-4, .ansi-fg-12, .ansi-fg-6, .ansi-fg-14 { color: #00a !important; }
+      .ansi-fg-5, .ansi-fg-13 { color: #808 !important; }
+      [class*="ansi-bg-"] { background: transparent !important; }
 
       /* Sinnvolle Seitenumbrüche. */
       .markdown-body h1, .markdown-body h2, .markdown-body h3 { break-after: avoid; }
@@ -609,6 +818,7 @@ HTML = r"""<!DOCTYPE html>
 
 <div class="toolbar">
   <span class="toolbar-title">MD</span>
+  <span class="toolbar-version" id="appVersion" title="Markdown Viewer, Version __APP_VERSION__">v__APP_VERSION__</span>
   <button class="btn primary" onclick="triggerFileInput()">Datei öffnen</button>
   <input id="fileInput" type="file" accept=".md,.markdown,.txt,.ipynb,.docx,.html,.htm" style="display:none" onchange="loadLocalFile(this)">
   <button class="btn" onclick="pasteFromClipboard()" title="Inhalt der Zwischenablage übernehmen – Text wird angezeigt, Bilder und formatierter Inhalt gehen in den Umwandlungsbereich">Einfügen</button>
@@ -625,6 +835,10 @@ HTML = r"""<!DOCTYPE html>
 <div class="main">
   <nav class="toc hidden" id="toc">
     <div class="toc-header">Inhaltsverzeichnis</div>
+    <label class="toc-opt" id="tocCodeOpt" style="display:none"
+           title="Code-Zellen mit ihrer ersten Zeile im Verzeichnis zeigen; ⚠ markiert Zellen mit Fehlern">
+      <input type="checkbox" id="tocCodeChk" onchange="onTocCodeChange(this)"> Code-Zellen zeigen
+    </label>
     <div id="tocLinks"></div>
   </nav>
 
@@ -873,7 +1087,9 @@ function renderMarkdown(source, name, size) {
   const output = document.getElementById('output');
   const dropzone = document.getElementById('dropzone');
 
-  output.innerHTML = marked.parse(source);
+  currentNb = null;
+  output.innerHTML = renderMd(source);
+  highlightCode(output);
   dropzone.style.display = 'none';
   output.style.display = 'block';
 
@@ -891,7 +1107,258 @@ function renderMarkdown(source, name, size) {
   document.getElementById('searchInput').value = '';
 }
 
-// ── Jupyter Notebook Rendering ──
+// ── Markdown mit Formeln ──
+// marked kennt keine Formeln und macht aus $a_1 * b_2$ Kursivschrift. Formeln
+// werden deshalb vor dem Parsen durch Platzhalter ersetzt und danach wortgetreu
+// zurückgesetzt – MathJax findet sie dann so, wie sie geschrieben wurden.
+// Code (Gruppe 1) bleibt stehen: Ein "$$" in einem Shell-Beispiel darf nicht
+// bis in den nächsten Absatz reichen. Aus demselben Grund endet eine $$-Formel
+// spätestens an einer Leerzeile. Ein $ vor einer Ziffer ("5 $ bis 10 $")
+// schließt keine Formel. \[ und \( sind bewusst nicht dabei: In Markdown
+// sind das maskierte Klammern, und escapeMd() erzeugt sie selbst.
+const MATH_RE = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|<pre[\s>][\s\S]*?<\/pre>)|(\$\$(?:(?!\n[ \t]*\n)[\s\S])+?\$\$|(?<![\\$\w])\$(?![\s$])(?:\\.|[^$\\\n])+?(?<!\s)\$(?!\d))/g;
+
+// Markdown → HTML für alles, was angezeigt wird: Formeln geschützt, Ergebnis
+// gefiltert. Markdown-Dateien und Notebook-Zellen dürfen rohes HTML enthalten,
+// und das stammt nicht von uns.
+function renderMd(src) {
+  const stash = [];
+  const prepared = String(src == null ? '' : src).replace(MATH_RE, (m, code, math) => {
+    if (code) return m;
+    stash.push(math);
+    return 'MDVMATH' + (stash.length - 1) + 'X';
+  });
+  let html = marked.parse(prepared);
+  if (stash.length) {
+    html = html.replace(/MDVMATH(\d+)X/g, (m, i) => stash[i] == null ? m : escapeHtml(stash[i]));
+  }
+  return sanitizeHtml(html);
+}
+
+// ── Syntax-Hervorhebung ──
+// highlight.js kommt wie marked vom CDN. Fehlt es (offline), bleibt der Code
+// einfarbig – lesbar ist er trotzdem. Blöcke ohne bekannte Sprache bleiben
+// ebenfalls einfarbig: lieber schlicht als falsch geraten.
+function safeLang(name) {
+  return String(name || '').toLowerCase().replace(/[^\w+#.-]/g, '');
+}
+
+// "python3" → "python": Kernel nennen ihre Sprache gern mit Versionsnummer.
+function normLang(name) {
+  const lang = safeLang(name);
+  if (window.hljs && hljs.getLanguage(lang)) return lang;
+  return lang.replace(/[\d.]+$/, '') || lang;
+}
+
+function hljsLanguage(name) {
+  const lang = normLang(name);
+  return lang && window.hljs && hljs.getLanguage(lang) ? lang : '';
+}
+
+function highlightCode(root) {
+  if (!window.hljs) return;
+  root.querySelectorAll('pre code').forEach(code => {
+    if (code.classList.contains('hljs')) return;
+    const m = /\blanguage-([\w+#.-]+)/.exec(code.className || '');
+    const lang = m ? hljsLanguage(m[1]) : '';
+    if (!lang) return;
+    try {
+      // highlight() arbeitet auf dem reinen Text und gibt escaptes HTML zurück.
+      code.innerHTML = hljs.highlight(code.textContent, { language: lang, ignoreIllegals: true }).value;
+      code.classList.add('hljs');
+    } catch (e) { /* einfarbig lassen */ }
+  });
+}
+
+// ── Jupyter-Notebooks ──
+// Angezeigt wird, was in der Datei steht – ausgeführt wird nichts, es gibt
+// keinen Kernel. Ausgaben sind die, die beim letzten Lauf gespeichert wurden.
+let currentNb = null;   // { nb, name, lang, sources } – für Kopieren und Export
+
+const NB_VIEW_KEY = 'mdv.nbView';
+let nbView = loadNbView();
+
+function loadNbView() {
+  const view = { lines: false, hideCode: false, hideOut: false, tocCode: false };
+  try {
+    const saved = JSON.parse(localStorage.getItem(NB_VIEW_KEY) || '{}');
+    Object.keys(view).forEach(k => { if (typeof saved[k] === 'boolean') view[k] = saved[k]; });
+  } catch (e) { /* ohne Speicher gelten die Vorgaben */ }
+  return view;
+}
+
+function saveNbView() {
+  try { localStorage.setItem(NB_VIEW_KEY, JSON.stringify(nbView)); } catch (e) {}
+}
+
+function applyNbView() {
+  const doc = document.querySelector('#output .nb-doc');
+  if (!doc) return;
+  doc.classList.toggle('show-lines', nbView.lines);
+  doc.classList.toggle('hide-code', nbView.hideCode);
+  doc.classList.toggle('hide-out', nbView.hideOut);
+  doc.querySelectorAll('[data-nbopt]').forEach(btn => {
+    const on = !!nbView[btn.dataset.nbopt];
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+// Zellen-Magics wie %%bash wechseln die Sprache einer einzelnen Zelle.
+const CELL_MAGIC_LANG = {
+  bash: 'bash', sh: 'bash', script: 'bash', html: 'xml', svg: 'xml',
+  javascript: 'javascript', js: 'javascript', sql: 'sql', latex: 'latex',
+  markdown: 'markdown', ruby: 'ruby', perl: 'perl', r: 'r'
+};
+
+function cellLanguage(cell, src, nbLang) {
+  const vscode = cell.metadata && cell.metadata.vscode && cell.metadata.vscode.languageId;
+  if (vscode) return normLang(vscode);
+  const m = /^\s*%%(\w+)/.exec(src);
+  const magic = m && CELL_MAGIC_LANG[m[1].toLowerCase()];
+  return magic || nbLang;
+}
+
+// ── Ein- und Ausklappen ──
+// Jeder Teil einer Zelle (Markdown, Code, jede Ausgabe) ist ein .nb-part:
+// ▾ klappt ihn auf eine Zusammenfassungszeile zusammen (.nb-folded). Lange
+// Teile starten gekürzt (.nb-clamped) mit "Ganze Zelle anzeigen" darunter.
+// Beides ist reine Ansicht – Druck, PDF und Export enthalten immer alles.
+const FOLD_CODE_LINES = 30;
+const FOLD_TEXT_LINES = 40;
+const FOLD_TABLE_ROWS = 30;
+const FOLD_MD_LINES = 40;
+const FOLD_MD_CHARS = 4000;
+const FOLD_BTN = '<button class="nb-fold" type="button" title="Einklappen" aria-expanded="true">▾</button>';
+
+function foldBody(summary, body, moreLabel) {
+  return '<div class="nb-fold-summary" title="Ausklappen">▸ ' + escapeHtml(summary) + '</div>' +
+         '<div class="nb-part-body">' + body + '</div>' +
+         (moreLabel ? '<button class="nb-more" type="button" data-label="' + escapeHtml(moreLabel) +
+                      '">▾ ' + escapeHtml(moreLabel) + '</button>' : '');
+}
+
+function shorten(text, max) {
+  const t = String(text).replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
+function firstLine(src) {
+  return String(src).split('\n').map(l => l.trim()).find(Boolean) || '';
+}
+
+function mdSummary(src) {
+  const line = firstLine(src)
+    .replace(/<[^>]*>/g, '')
+    .replace(/^(#+|>|[-*+]|\d+[.)])\s*/, '')
+    .replace(/[*_`~]/g, '');
+  return shorten(line, 90) || 'Markdown';
+}
+
+function codeSummary(src, lines) {
+  const line = shorten(firstLine(src), 80) || '(leer)';
+  return lines > 1 ? line + '  … (' + lines + ' Zeilen)' : line;
+}
+
+// Der eigene Knopf eines Teils ist der erste – fremdes Markup aus der Zelle
+// steht immer erst dahinter.
+function setFolded(part, folded) {
+  part.classList.toggle('nb-folded', folded);
+  const btn = part.querySelector('.nb-fold');
+  if (btn) {
+    btn.textContent = folded ? '▸' : '▾';
+    btn.title = folded ? 'Ausklappen' : 'Einklappen';
+    btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
+  }
+}
+
+// Nur der eigene Knopf: In einer Markdown-Zelle stünde fremdes Markup mit
+// derselben Klasse vor ihm.
+function ownMore(part) {
+  return part.querySelector(':scope > .nb-part-main > .nb-more, :scope > .nb-code-body > .nb-more');
+}
+
+function setClamped(part, clamped) {
+  const more = ownMore(part);
+  if (!more) return;
+  part.classList.toggle('nb-clamped', clamped);
+  more.textContent = clamped ? '▾ ' + more.dataset.label : '▴ Weniger anzeigen';
+}
+
+function setAllFolded(folded) {
+  document.querySelectorAll('#output .nb-part').forEach(part => {
+    setFolded(part, folded);
+    if (!folded) setClamped(part, false);
+  });
+}
+
+// Macht ein Element sichtbar, das in einem eingeklappten oder gekürzten Teil
+// steckt – für Inhaltsverzeichnis und Suche.
+function revealInNotebook(el) {
+  for (let part = el && el.closest && el.closest('.nb-part'); part;
+       part = part.parentElement && part.parentElement.closest('.nb-part')) {
+    if (part.classList.contains('nb-folded')) setFolded(part, false);
+    if (part.classList.contains('nb-clamped')) setClamped(part, false);
+  }
+}
+
+// ── Navigation für Notebooks ──
+// Überschriften aus den Markdown-Zellen, auf Wunsch die Code-Zellen dazu.
+// Hat ein Notebook gar keine Überschriften, entsteht die Navigation aus den
+// Zellen selbst – sonst bliebe sie gerade bei unstrukturierten Notebooks leer.
+function buildNotebookToc(container) {
+  const tocLinks = document.getElementById('tocLinks');
+  const opt = document.getElementById('tocCodeOpt');
+  tocLinks.innerHTML = '';
+  tocEntries = [];
+  opt.style.display = '';
+  document.getElementById('tocCodeChk').checked = nbView.tocCode;
+
+  const cells = Array.from(container.querySelectorAll('.nb-doc > .nb-cell'));
+  const hasHeadings = cells.some(c => c.classList.contains('nb-cell-md') &&
+                                      c.querySelector('.nb-md h1, .nb-md h2, .nb-md h3, .nb-md h4'));
+  let id = 0;
+  let level = 'h1';   // Code-Einträge rücken unter die letzte Überschrift ein
+  cells.forEach(cell => {
+    const idx = +cell.dataset.cell;
+    if (cell.classList.contains('nb-cell-md')) {
+      const heads = cell.querySelectorAll('.nb-md h1, .nb-md h2, .nb-md h3, .nb-md h4');
+      if (heads.length) {
+        heads.forEach(h => {
+          if (!h.id) h.id = 'heading-' + (id++);
+          level = h.tagName.toLowerCase();
+          addTocEntry(h.textContent, 'toc-item ' + level, h);
+        });
+      } else if (!hasHeadings && currentNb) {
+        addTocEntry(mdSummary(currentNb.sources[idx] || ''), 'toc-item h2', cell);
+      }
+    } else if (cell.classList.contains('nb-code') && (nbView.tocCode || !hasHeadings) && currentNb &&
+               !codeCellHidden(cell)) {
+      const prompt = cell.querySelector('.nb-prompt.in');
+      const count = prompt ? (prompt.textContent.match(/In \[([^\]]*)\]/) || [])[1] : '';
+      const err = cell.querySelector(':scope > .nb-output.nb-has-error') ? '⚠ ' : '';
+      const indent = { h1: 'h2', h2: 'h3', h3: 'h4', h4: 'h4' }[level];
+      addTocEntry(err + '[' + (count || ' ').trim() + '] ' + shorten(firstLine(currentNb.sources[idx] || ''), 60),
+                  'toc-item toc-code ' + indent + (err ? ' toc-error' : ''), cell);
+    }
+  });
+
+  document.getElementById('toc').classList.toggle('hidden', tocEntries.length === 0);
+  updateTocActive();
+}
+
+// Wie die CSS-Regeln zu "Code/Ausgaben ausblenden" – ohne Layout abzufragen.
+function codeCellHidden(cell) {
+  if (!nbView.hideCode) return false;
+  return nbView.hideOut || cell.classList.contains('nb-no-out');
+}
+
+function onTocCodeChange(chk) {
+  nbView.tocCode = chk.checked;
+  saveNbView();
+  if (currentNb) buildNotebookToc(document.getElementById('output'));
+}
+
 function renderNotebook(source, name, size) {
   const output = document.getElementById('output');
   const dropzone = document.getElementById('dropzone');
@@ -900,6 +1367,7 @@ function renderNotebook(source, name, size) {
   try {
     nb = JSON.parse(source);
   } catch (err) {
+    currentNb = null;
     output.innerHTML = '<p style="color:#f48771;">Ungültige .ipynb-Datei: ' +
                        escapeHtml(err.message) + '</p>';
     dropzone.style.display = 'none';
@@ -908,41 +1376,70 @@ function renderNotebook(source, name, size) {
   }
 
   const cells = Array.isArray(nb.cells) ? nb.cells : [];
-  const lang = (nb.metadata && nb.metadata.kernelspec && nb.metadata.kernelspec.language)
-               || (nb.metadata && nb.metadata.language_info && nb.metadata.language_info.name)
-               || 'python';
+  const meta = nb.metadata || {};
+  const lang = normLang((meta.kernelspec && meta.kernelspec.language) ||
+                        (meta.language_info && meta.language_info.name) ||
+                        'python') || 'python';
+  // Erst nach erfolgreichem Rendern übernehmen – sonst würden Kopieren und
+  // Export auf ein Notebook zielen, das gar nicht angezeigt wird.
+  const loaded = { nb: nb, name: name || '', lang: lang, sources: [] };
 
+  const stats = { code: 0, md: 0, raw: 0, executed: 0 };
   const parts = [];
-  let codeCells = 0;
-  let mdCells = 0;
 
-  cells.forEach(cell => {
+  cells.forEach((cell, i) => {
+    if (!cell || typeof cell !== 'object') return;
     const src = joinSource(cell.source);
+    loaded.sources[i] = src;
     if (cell.cell_type === 'markdown') {
-      mdCells++;
-      parts.push('<div class="nb-cell nb-cell-md"><div class="nb-md">' +
-                 marked.parse(src) + '</div></div>');
+      stats.md++;
+      const lines = src.split('\n').length;
+      // Eingebettete Bilder (data:) machen eine Zelle nicht "lang".
+      const long = lines > FOLD_MD_LINES ||
+                   src.replace(/data:[^)\s"']+/g, '').length > FOLD_MD_CHARS;
+      parts.push('<div class="nb-cell nb-cell-md nb-part' + (long ? ' nb-clamped' : '') +
+        '" data-cell="' + i + '">' +
+        '<div class="nb-gutter">' + FOLD_BTN + '</div><div class="nb-part-main">' +
+        foldBody(mdSummary(src),
+                 '<div class="nb-md">' + renderMd(inlineAttachments(src, cell.attachments)) + '</div>',
+                 long ? 'Ganze Zelle anzeigen (' + lines + ' Zeilen)' : '') +
+        '</div></div>');
     } else if (cell.cell_type === 'code') {
-      codeCells++;
-      const execCount = cell.execution_count == null ? ' ' : cell.execution_count;
-      let html = '<div class="nb-cell">';
-      html += '<div class="nb-input"><div class="nb-prompt in">In [' + execCount + ']:</div>' +
-              '<div class="nb-code-body"><pre><code>' + escapeHtml(src) + '</code></pre></div></div>';
+      stats.code++;
+      if (cell.execution_count != null) stats.executed++;
+      // Escapen: In einer präparierten Datei steht hier womöglich Markup.
+      const count = cell.execution_count == null ? ' ' : escapeHtml(cell.execution_count);
       const outs = Array.isArray(cell.outputs) ? cell.outputs : [];
-      outs.forEach(o => {
-        html += renderOutput(o, execCount);
-      });
-      html += '</div>';
-      parts.push(html);
+      const outHtml = outs.map(o => (o && typeof o === 'object') ? renderOutput(o, count) : '').join('');
+      const lines = src.replace(/\n$/, '').split('\n').length;
+      const long = lines > FOLD_CODE_LINES;
+      // Der Kopieren-Knopf sitzt in der Prompt-Spalte, nicht über dem Code.
+      parts.push('<div class="nb-cell nb-code' + (outHtml ? '' : ' nb-no-out') +
+        '" data-cell="' + i + '">' +
+        '<div class="nb-input nb-part' + (long ? ' nb-clamped' : '') + '">' +
+        '<div class="nb-prompt in">' + FOLD_BTN + 'In [' + count + ']:' +
+        '<button class="nb-copy" type="button" data-cell="' + i + '" ' +
+        'title="Code in die Zwischenablage kopieren">Kopieren</button></div>' +
+        '<div class="nb-code-body">' +
+        foldBody(codeSummary(src, lines), codeBlockHtml(src, cellLanguage(cell, src, lang)),
+                 long ? 'Ganze Zelle anzeigen (' + lines + ' Zeilen)' : '') +
+        '</div></div>' + outHtml + '</div>');
     } else if (cell.cell_type === 'raw') {
-      parts.push('<div class="nb-cell"><div class="nb-input">' +
-                 '<div class="nb-prompt">raw:</div>' +
-                 '<div class="nb-code-body"><pre><code>' + escapeHtml(src) +
-                 '</code></pre></div></div></div>');
+      stats.raw++;
+      parts.push('<div class="nb-cell" data-cell="' + i + '"><div class="nb-input nb-part">' +
+                 '<div class="nb-prompt">' + FOLD_BTN + 'raw:</div>' +
+                 '<div class="nb-code-body">' +
+                 foldBody(codeSummary(src, src.split('\n').length),
+                          '<pre><code>' + escapeHtml(src) + '</code></pre>', '') +
+                 '</div></div></div>');
     }
   });
 
-  output.innerHTML = parts.join('\n');
+  output.innerHTML = '<div class="nb-doc">' + notebookHeader(nb, stats, cells.length) +
+                     parts.join('\n') + '</div>';
+  currentNb = loaded;
+  highlightCode(output);
+  applyNbView();
   dropzone.style.display = 'none';
   output.style.display = 'block';
 
@@ -951,12 +1448,62 @@ function renderNotebook(source, name, size) {
 
   const kb = size ? (size / 1024).toFixed(1) + ' KB · ' : '';
   document.getElementById('status').textContent =
-    `${kb}${cells.length} Zellen · ${codeCells} Code · ${mdCells} Markdown · ${lang}`;
+    `${kb}${cells.length} Zellen · ${stats.code} Code · ${stats.md} Markdown · ${lang}`;
 
-  buildToc(output);
+  buildNotebookToc(output);
   typesetMath(output);
   document.getElementById('contentWrap').scrollTop = 0;
   document.getElementById('searchInput').value = '';
+}
+
+function notebookHeader(nb, stats, total) {
+  const meta = nb.metadata || {};
+  const ks = meta.kernelspec || {};
+  const li = meta.language_info || {};
+  const info = [];
+  const kernel = ks.display_name || ks.name;
+  if (kernel) info.push('Kernel: ' + kernel);
+  const language = li.name || ks.language;
+  if (language) info.push('Sprache: ' + language + (li.version ? ' ' + li.version : ''));
+  info.push(total + ' Zellen (' + stats.code + ' Code, ' + stats.md + ' Markdown' +
+            (stats.raw ? ', ' + stats.raw + ' Raw' : '') + ')');
+  if (stats.code) {
+    info.push(stats.executed === 0 ? 'nicht ausgeführt'
+            : stats.executed === stats.code ? 'alle Code-Zellen ausgeführt'
+            : stats.executed + ' von ' + stats.code + ' Code-Zellen ausgeführt');
+  }
+  if (nb.nbformat) {
+    info.push('nbformat ' + nb.nbformat + (nb.nbformat_minor != null ? '.' + nb.nbformat_minor : ''));
+  }
+  return '<div class="nb-header">' +
+    '<div class="nb-meta">' + info.map(t => escapeHtml(String(t))).join(' · ') + '</div>' +
+    '<div class="nb-tools">' +
+    '<button class="btn" type="button" data-nbopt="lines" ' +
+      'title="Zeilennummern in Code-Zellen ein- oder ausblenden">Zeilennummern</button>' +
+    '<button class="btn" type="button" data-nbopt="hideCode" ' +
+      'title="Nur Text und Ergebnisse zeigen – gilt auch für PDF und Markdown-Export">Code ausblenden</button>' +
+    '<button class="btn" type="button" data-nbopt="hideOut" ' +
+      'title="Ausgaben ausblenden – gilt auch für PDF und Markdown-Export">Ausgaben ausblenden</button>' +
+    '<button class="btn" type="button" data-nbaction="foldAll" ' +
+      'title="Alle Zellen auf eine Zeile einklappen – Überblick über das ganze Notebook">Alle einklappen</button>' +
+    '<button class="btn" type="button" data-nbaction="unfoldAll" ' +
+      'title="Alle Zellen vollständig ausklappen, auch gekürzte lange Zellen">Alle ausklappen</button>' +
+    '<button class="btn" type="button" data-nbaction="export" ' +
+      'title="Notebook als Markdown-Datei speichern, Bilder in den Unterordner bilder/">Als Markdown speichern</button>' +
+    '</div></div>';
+}
+
+// Code mit Zeilennummern-Spalte daneben. Die Spalte ist ein eigenes <pre> mit
+// derselben Schrift statt einer Nummer pro Zeile im Code – so zerschneidet sie
+// weder die Hervorhebung noch das Markieren und Kopieren.
+function codeBlockHtml(src, lang) {
+  const text = src.replace(/\n$/, '');
+  const lines = text.split('\n').length;
+  const nums = Array.from({ length: lines }, (_, k) => k + 1).join('\n');
+  return '<div class="nb-code-wrap">' +
+    '<pre class="nb-lineno" aria-hidden="true"><code>' + nums + '</code></pre>' +
+    '<pre class="nb-src"><code class="language-' + safeLang(lang) + '">' +
+    escapeHtml(text) + '</code></pre></div>';
 }
 
 function joinSource(s) {
@@ -964,52 +1511,485 @@ function joinSource(s) {
   return s == null ? '' : String(s);
 }
 
-function renderOutput(o, execCount) {
+// Base64 aus einer Notebook-Datei, nur wenn es wirklich Base64 ist – der Wert
+// landet in einem src-Attribut.
+function cleanBase64(value) {
+  const s = joinSource(value).replace(/\s+/g, '');
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(s) ? s : '';
+}
+
+// Bilder, die direkt in eine Markdown-Zelle eingefügt wurden, stehen als
+// "attachment:name" im Text und als Base64 in cell.attachments.
+const ATTACHMENT_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+function attachmentImage(attachments, name) {
+  if (!attachments || typeof attachments !== 'object') return null;
+  let entry = attachments[name];
+  if (!entry) { try { entry = attachments[decodeURIComponent(name)]; } catch (e) {} }
+  if (!entry || typeof entry !== 'object') return null;
+  for (const mime of ATTACHMENT_MIMES) {
+    const b64 = cleanBase64(entry[mime]);
+    if (b64) return { mime: mime, b64: b64 };
+  }
+  return null;
+}
+
+function inlineAttachments(src, attachments) {
+  if (!attachments) return src;
+  return src.replace(/attachment:([^\s)"'>]+)/g, (m, name) => {
+    const img = attachmentImage(attachments, name);
+    return img ? 'data:' + img.mime + ';base64,' + img.b64 : m;
+  });
+}
+
+// Reihenfolge wie in Jupyter: die reichhaltigste Darstellung gewinnt.
+const OUTPUT_MIMES = ['text/html', 'text/markdown', 'text/latex', 'image/svg+xml',
+                      'image/png', 'image/jpeg', 'image/gif', 'text/plain'];
+
+function pickOutput(data) {
+  for (const mime of OUTPUT_MIMES) {
+    if (data[mime] == null) continue;
+    const value = joinSource(data[mime]);
+    if (mime === 'text/html' || mime === 'image/svg+xml') {
+      const clean = sanitizeHtml(value);
+      // Plotly & Co. liefern HTML, das nur aus Skripten besteht – nach dem
+      // Filtern bliebe eine leere Fläche. Dann lieber das Bild daneben.
+      if (!hasVisibleContent(clean)) continue;
+      return { mime: mime, value: clean };
+    }
+    if (mime.startsWith('image/')) {
+      const b64 = cleanBase64(value);
+      if (!b64) continue;
+      return { mime: mime, value: b64 };
+    }
+    if (mime !== 'text/plain' && !value.trim()) continue;
+    return { mime: mime, value: value };
+  }
+  return null;
+}
+
+function hasVisibleContent(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  tpl.content.querySelectorAll('style').forEach(s => s.remove());
+  return !!(tpl.content.textContent.trim() ||
+            tpl.content.querySelector('img, svg, table, canvas, video, math'));
+}
+
+// Eine Ausgabe als einklappbarer Teil. Lang ist sie ab FOLD_TEXT_LINES
+// Textzeilen bzw. FOLD_TABLE_ROWS Tabellenzeilen – dann startet sie gekürzt.
+function outputPart(promptHtml, summary, body, moreLabel, extraCls) {
+  return '<div class="nb-output nb-part' + (moreLabel ? ' nb-clamped' : '') +
+         (extraCls ? ' ' + extraCls : '') + '">' +
+         '<div class="nb-prompt' + promptHtml.cls + '">' + FOLD_BTN + promptHtml.text + '</div>' +
+         '<div class="nb-code-body">' + foldBody(summary, body, moreLabel) + '</div></div>';
+}
+
+function textLines(text) {
+  return String(text).replace(/\n+$/, '').split('\n').length;
+}
+
+function renderOutput(o, count) {
   const type = o.output_type;
+  const noPrompt = { cls: '', text: '' };
   if (type === 'stream') {
-    const text = joinSource(o.text);
-    const cls = o.name === 'stderr' ? 'nb-out-err' : 'nb-out-text';
-    return '<div class="nb-output"><div class="nb-prompt"></div>' +
-           '<div class="nb-code-body"><pre class="' + cls + '">' +
-           escapeHtml(stripAnsi(text)) + '</pre></div></div>';
+    const text = applyCarriageReturns(joinSource(o.text));
+    const lines = textLines(text);
+    const err = o.name === 'stderr';
+    return outputPart(noPrompt, (err ? 'Meldungen' : 'Ausgabe') + ': ' + plural(lines, 'Zeile', 'Zeilen'),
+      '<pre class="' + (err ? 'nb-out-err' : 'nb-out-text') + '">' + ansiToHtml(text) + '</pre>',
+      lines > FOLD_TEXT_LINES ? 'Vollständig anzeigen (' + lines + ' Zeilen)' : '');
   }
   if (type === 'error') {
-    const tb = (o.traceback || []).map(l => stripAnsi(l)).join('\n');
-    return '<div class="nb-output"><div class="nb-prompt"></div>' +
-           '<div class="nb-code-body"><pre class="nb-out-err">' +
-           escapeHtml(tb) + '</pre></div></div>';
+    const text = errorText(o);
+    const lines = textLines(text);
+    const what = 'Fehler: ' + (o.ename || '') + (o.evalue ? ': ' + o.evalue : '');
+    return outputPart(noPrompt, stripAnsi(what).slice(0, 120),
+      '<pre class="nb-out-err">' + ansiToHtml(text) + '</pre>',
+      lines > FOLD_TEXT_LINES ? 'Vollständig anzeigen (' + lines + ' Zeilen)' : '', 'nb-has-error');
   }
   if (type === 'execute_result' || type === 'display_data') {
-    const data = o.data || {};
-    const prompt = type === 'execute_result'
-      ? '<div class="nb-prompt out">Out[' + execCount + ']:</div>'
-      : '<div class="nb-prompt"></div>';
-    let body = '';
-    if (data['image/png']) {
-      body = '<img class="nb-out-img" src="data:image/png;base64,' +
-             joinSource(data['image/png']).replace(/\s+/g, '') + '">';
-    } else if (data['image/jpeg']) {
-      body = '<img class="nb-out-img" src="data:image/jpeg;base64,' +
-             joinSource(data['image/jpeg']).replace(/\s+/g, '') + '">';
-    } else if (data['image/svg+xml']) {
-      body = '<div class="nb-out-html">' + sanitizeHtml(joinSource(data['image/svg+xml'])) + '</div>';
-    } else if (data['text/html']) {
-      body = '<div class="nb-out-html">' + sanitizeHtml(joinSource(data['text/html'])) + '</div>';
-    } else if (data['text/markdown']) {
-      body = '<div class="nb-out-html">' + marked.parse(joinSource(data['text/markdown'])) + '</div>';
-    } else if (data['text/latex']) {
-      body = '<div class="nb-out-html">' + escapeHtml(joinSource(data['text/latex'])) + '</div>';
-    } else if (data['text/plain']) {
-      body = '<pre class="nb-out-text">' + escapeHtml(joinSource(data['text/plain'])) + '</pre>';
+    const out = pickOutput(o.data || {});
+    if (!out) return '';
+    const prompt = type === 'execute_result' ? { cls: ' out', text: 'Out[' + count + ']:' } : noPrompt;
+    let summary = 'Ausgabe';
+    let more = '';
+    if (out.mime === 'text/html') {
+      const rows = (out.value.match(/<tr[\s>]/gi) || []).length;
+      summary = rows ? 'Ausgabe: Tabelle, ' + plural(rows, 'Zeile', 'Zeilen') : 'Ausgabe: HTML';
+      if (rows > FOLD_TABLE_ROWS) more = 'Ganze Tabelle anzeigen (' + rows + ' Zeilen)';
+    } else if (out.mime === 'text/plain' || out.mime === 'text/markdown') {
+      const lines = textLines(out.value);
+      summary = 'Ausgabe: ' + plural(lines, 'Zeile', 'Zeilen');
+      if (lines > FOLD_TEXT_LINES) more = 'Vollständig anzeigen (' + lines + ' Zeilen)';
+    } else if (out.mime === 'text/latex') {
+      summary = 'Ausgabe: Formel';
+    } else {
+      summary = 'Ausgabe: Bild';
     }
-    return '<div class="nb-output">' + prompt +
-           '<div class="nb-code-body">' + body + '</div></div>';
+    return outputPart(prompt, summary, outputBody(out), more);
   }
   return '';
 }
 
+function plural(n, one, many) {
+  return n + ' ' + (n === 1 ? one : many);
+}
+
+function outputBody(out) {
+  switch (out.mime) {
+    case 'text/html':
+    case 'image/svg+xml':
+      return '<div class="nb-out-html">' + out.value + '</div>';
+    case 'text/markdown':
+      return '<div class="nb-out-html">' + renderMd(out.value) + '</div>';
+    case 'text/latex':
+      // MathJax setzt die Formel beim anschließenden typesetMath().
+      return '<div class="nb-out-latex">' + escapeHtml(wrapLatex(out.value)) + '</div>';
+    case 'text/plain':
+      return '<pre class="nb-out-text">' + ansiToHtml(out.value) + '</pre>';
+    default:
+      return '<img class="nb-out-img" alt="" src="data:' + out.mime + ';base64,' + out.value + '">';
+  }
+}
+
+function errorText(o) {
+  if (Array.isArray(o.traceback) && o.traceback.length) {
+    return o.traceback.map(joinSource).join('\n');
+  }
+  return (o.ename || 'Fehler') + ': ' + (o.evalue || '');
+}
+
+// LaTeX-Ausgaben (z. B. von SymPy) bringen ihre Begrenzer meist selbst mit.
+function wrapLatex(s) {
+  const t = String(s).trim();
+  return /^(\$|\\\[|\\\(|\\begin\{)/.test(t) ? t : '$$' + t + '$$';
+}
+
+// Fortschrittsbalken überschreiben ihre Zeile mit \r. Gezeigt wird wie im
+// Terminal nur der letzte Stand jeder Zeile.
+function applyCarriageReturns(text) {
+  return String(text).replace(/\r\n/g, '\n').split('\n').map(line => {
+    if (!line.includes('\r')) return line;
+    const states = line.split('\r').filter(Boolean);
+    return states.length ? states[states.length - 1] : '';
+  }).join('\n');
+}
+
 function stripAnsi(s) {
-  return String(s).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  return String(s)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+    .replace(/\x1b/g, '');
+}
+
+// ANSI-Farbcodes (Tracebacks, farbige Logs) als HTML. Gebaut wird nur aus
+// escaptem Text, festen Klassen und selbst berechneten rgb()-Werten – fremdes
+// Markup kommt so nicht hinein.
+function ansiToHtml(text) {
+  const s = String(text).replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');   // OSC, z. B. Links
+  const st = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false };
+  const re = /\x1b\[([0-9;?]*)([A-Za-z])/g;
+  let out = '';
+  let last = 0;
+  let m;
+
+  const emit = chunk => {
+    chunk = chunk.replace(/\x1b/g, '');
+    if (!chunk) return;
+    const cls = [];
+    const style = [];
+    if (typeof st.fg === 'number') cls.push('ansi-fg-' + st.fg);
+    else if (st.fg) { cls.push('ansi-fg-rgb'); style.push('color:' + st.fg); }
+    if (typeof st.bg === 'number') cls.push('ansi-bg-' + st.bg);
+    else if (st.bg) { cls.push('ansi-bg-rgb'); style.push('background:' + st.bg); }
+    if (st.bold) cls.push('ansi-bold');
+    if (st.dim) cls.push('ansi-dim');
+    if (st.italic) cls.push('ansi-italic');
+    if (st.underline) cls.push('ansi-underline');
+    const esc = escapeHtml(chunk);
+    out += cls.length
+      ? '<span class="' + cls.join(' ') + '"' +
+        (style.length ? ' style="' + style.join(';') + '"' : '') + '>' + esc + '</span>'
+      : esc;
+  };
+
+  while ((m = re.exec(s))) {
+    emit(s.slice(last, m.index));
+    last = re.lastIndex;
+    if (m[2] === 'm') applySgr(st, m[1]);   // alles andere (Cursor, Löschen) entfällt
+  }
+  emit(s.slice(last));
+  return out;
+}
+
+function applySgr(st, params) {
+  const codes = params === '' ? [0] : params.split(';').map(p => parseInt(p, 10) || 0);
+  for (let i = 0; i < codes.length; i++) {
+    const c = codes[i];
+    if (c === 0) {
+      st.fg = st.bg = null;
+      st.bold = st.dim = st.italic = st.underline = false;
+    }
+    else if (c === 1) st.bold = true;
+    else if (c === 2) st.dim = true;
+    else if (c === 3) st.italic = true;
+    else if (c === 4) st.underline = true;
+    else if (c === 22) st.bold = st.dim = false;
+    else if (c === 23) st.italic = false;
+    else if (c === 24) st.underline = false;
+    else if (c >= 30 && c <= 37) st.fg = c - 30;
+    else if (c >= 90 && c <= 97) st.fg = c - 82;      // helle Varianten: 8–15
+    else if (c === 39) st.fg = null;
+    else if (c >= 40 && c <= 47) st.bg = c - 40;
+    else if (c >= 100 && c <= 107) st.bg = c - 92;
+    else if (c === 49) st.bg = null;
+    else if (c === 38 || c === 48) {
+      let color = null;
+      if (codes[i + 1] === 5) { color = ansi256(codes[i + 2]); i += 2; }
+      else if (codes[i + 1] === 2) { color = rgbColor(codes[i + 2], codes[i + 3], codes[i + 4]); i += 4; }
+      if (c === 38) st.fg = color; else st.bg = color;
+    }
+  }
+}
+
+// 0–15 sind die Grundfarben (als Klasse), darüber Farbwürfel und Graustufen.
+function ansi256(n) {
+  n = n | 0;
+  if (n < 0 || n > 255) return null;
+  if (n < 16) return n;
+  if (n >= 232) { const g = 8 + (n - 232) * 10; return rgbColor(g, g, g); }
+  n -= 16;
+  const level = v => (v ? 55 + v * 40 : 0);
+  return rgbColor(level(Math.floor(n / 36)), level(Math.floor(n / 6) % 6), level(n % 6));
+}
+
+function rgbColor(r, g, b) {
+  const c = v => Math.max(0, Math.min(255, v | 0));
+  return 'rgb(' + c(r) + ',' + c(g) + ',' + c(b) + ')';
+}
+
+// Schalter, Kopieren und Export in der Notebook-Ansicht – ein Handler für alle,
+// weil die Knöpfe bei jedem Öffnen neu entstehen.
+document.getElementById('output').addEventListener('click', e => {
+  // Eigene Bedienelemente stehen nie im Inhalt einer Zelle. Was dort liegt,
+  // stammt aus der Datei – auch wenn es Klassen wie nb-fold oder data-nbaction trägt.
+  if (e.target.closest('.nb-part-body')) return;
+  const opt = e.target.closest('[data-nbopt]');
+  if (opt) {
+    const key = opt.dataset.nbopt;
+    nbView[key] = !nbView[key];
+    saveNbView();
+    applyNbView();
+    // Ausgeblendete Code-Zellen verschwinden auch aus dem Verzeichnis.
+    if ((key === 'hideCode' || key === 'hideOut') && currentNb) buildNotebookToc(document.getElementById('output'));
+    return;
+  }
+  if (e.target.closest('[data-nbaction="export"]')) {
+    exportNotebookMarkdown();
+    return;
+  }
+  if (e.target.closest('[data-nbaction="foldAll"]')) { setAllFolded(true); updateTocActive(); return; }
+  if (e.target.closest('[data-nbaction="unfoldAll"]')) { setAllFolded(false); updateTocActive(); return; }
+  const fold = e.target.closest('.nb-fold');
+  if (fold) {
+    const part = fold.closest('.nb-part');
+    if (part) setFolded(part, !part.classList.contains('nb-folded'));
+    return;
+  }
+  const summary = e.target.closest('.nb-fold-summary');
+  if (summary) {
+    const part = summary.closest('.nb-part');
+    if (part) setFolded(part, false);
+    return;
+  }
+  const more = e.target.closest('.nb-more');
+  if (more) {
+    const part = more.closest('.nb-part');
+    if (!part) return;
+    const clamp = !part.classList.contains('nb-clamped');
+    setClamped(part, clamp);
+    // Beim Zurückkürzen nicht irgendwo mitten im Dokument stehen bleiben.
+    if (clamp && part.getBoundingClientRect().top < 0) part.scrollIntoView({ block: 'start' });
+    return;
+  }
+  const copy = e.target.closest('.nb-copy');
+  if (copy && currentNb) copyCell(copy, currentNb.sources[+copy.dataset.cell] || '');
+});
+
+async function copyCell(btn, text) {
+  const ok = await copyText(text);
+  btn.textContent = ok ? 'Kopiert ✓' : 'Fehlgeschlagen';
+  setTimeout(() => { btn.textContent = 'Kopieren'; }, 1500);
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* weiter mit dem alten Weg */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) {}
+  ta.remove();
+  return ok;
+}
+
+// ── Notebook → Markdown ──
+// Code als Fence in der Sprache der Zelle, Bilder als Dateien im Unterordner.
+// Was in der Ansicht ausgeblendet ist (Code/Ausgaben), bleibt auch hier weg.
+function notebookToMarkdown() {
+  const nb = currentNb.nb;
+  const base = (currentNb.name || 'notebook').replace(/\.ipynb$/i, '') || 'notebook';
+  const stem = base.replace(/[^\w.-]+/g, '_');
+  const images = [];
+  const addImage = (mime, b64) => {
+    const file = stem + '-' + (images.length + 1) + '.' + imageExt(mime);
+    images.push({ filename: file, data: b64 });
+    return IMG_DIR + '/' + file;
+  };
+
+  const blocks = [];
+  (Array.isArray(nb.cells) ? nb.cells : []).forEach(cell => {
+    if (!cell || typeof cell !== 'object') return;
+    const src = joinSource(cell.source).replace(/\s+$/, '');
+    if (cell.cell_type === 'markdown') {
+      const md = src.replace(/attachment:([^\s)"'>]+)/g, (m, name) => {
+        const img = attachmentImage(cell.attachments, name);
+        return img ? addImage(img.mime, img.b64) : m;
+      });
+      if (md.trim()) blocks.push(md);
+    } else if (cell.cell_type === 'code') {
+      if (!nbView.hideCode && src.trim()) {
+        blocks.push(fence(src, cellLanguage(cell, src, currentNb.lang)));
+      }
+      if (!nbView.hideOut) {
+        (Array.isArray(cell.outputs) ? cell.outputs : []).forEach(o => {
+          const md = outputMarkdown(o, addImage);
+          if (md) blocks.push(md);
+        });
+      }
+    } else if (cell.cell_type === 'raw') {
+      if (src.trim()) blocks.push(fence(src, ''));
+    }
+  });
+
+  return { markdown: blocks.join('\n\n') + '\n', images: images, suggestedName: base + '.md' };
+}
+
+// Der Zaun ist länger als jede Backtick-Folge im Code, sonst endet er zu früh.
+function fence(src, lang) {
+  const longest = (src.match(/`+/g) || []).reduce((n, run) => Math.max(n, run.length), 0);
+  const ticks = '`'.repeat(Math.max(3, longest + 1));
+  return ticks + normLang(lang) + '\n' + src.replace(/\n+$/, '') + '\n' + ticks;
+}
+
+function imageExt(mime) {
+  return mime === 'image/svg+xml' ? 'svg' : extFor(mime);
+}
+
+function utf8ToBase64(s) {
+  return btoa(unescape(encodeURIComponent(s)));
+}
+
+function outputMarkdown(o, addImage) {
+  const type = o.output_type;
+  if (type === 'stream') {
+    const text = stripAnsi(applyCarriageReturns(joinSource(o.text))).replace(/\s+$/, '');
+    return text ? fence(text, 'text') : '';
+  }
+  if (type === 'error') {
+    return fence(stripAnsi(errorText(o)).replace(/\s+$/, ''), 'text');
+  }
+  if (type !== 'execute_result' && type !== 'display_data') return '';
+  const out = pickOutput(o.data || {});
+  if (!out) return '';
+  switch (out.mime) {
+    case 'text/html': {
+      // Tabellen (pandas) werden zu Markdown-Tabellen, eingebettete Bilder zu Dateien.
+      const holder = document.createElement('div');
+      holder.innerHTML = out.value;
+      const md = htmlToMarkdown(holder, (src, alt) => {
+        // Nur Formate, für die es eine passende Dateiendung gibt; alles andere
+        // bleibt als data:-Adresse im Text.
+        const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.*)$/i.exec(src || '');
+        const b64 = m ? cleanBase64(m[2]) : '';
+        const target = b64 ? addImage(m[1].toLowerCase(), b64) : src;
+        return target ? '![' + (alt || '') + '](' + target + ')' : '';
+      }).trim();
+      if (md) return md;
+      const plain = stripAnsi(joinSource((o.data || {})['text/plain'])).replace(/\s+$/, '');
+      return plain ? fence(plain, 'text') : '';
+    }
+    case 'image/svg+xml': {
+      // Als eigene .svg-Datei muss es echtes XML sein (xmlns, keine &nbsp;),
+      // nicht das HTML-Serialisat aus dem Sanitizer.
+      const tpl = document.createElement('template');
+      tpl.innerHTML = out.value;
+      const svg = tpl.content.querySelector('svg');
+      if (!svg) return '';
+      return '![](' + addImage('image/svg+xml', utf8ToBase64(new XMLSerializer().serializeToString(svg))) + ')';
+    }
+    case 'text/markdown':
+      return out.value.trim();
+    case 'text/latex':
+      return wrapLatex(out.value);
+    case 'text/plain': {
+      const text = stripAnsi(out.value).replace(/\s+$/, '');
+      return text ? fence(text, 'text') : '';
+    }
+    default:
+      return '![](' + addImage(out.mime, out.value) + ')';
+  }
+}
+
+async function exportNotebookMarkdown() {
+  if (!currentNb) return;
+  const result = notebookToMarkdown();
+  const skipped = [nbView.hideCode && 'Code', nbView.hideOut && 'Ausgaben'].filter(Boolean);
+  const btn = document.querySelector('[data-nbaction="export"]');
+  if (btn) btn.disabled = true;
+  setStatus('Speichern-Dialog geöffnet – bitte Ziel wählen …');
+  try {
+    const res = await fetch('/api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        markdown: result.markdown,
+        images: result.images,
+        suggested_name: result.suggestedName
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+    if (data.cancelled) { setStatus('Speichern abgebrochen.'); return; }
+    const note = skipped.length ? ' – ohne ' + skipped.join(' und ') + ' (ausgeblendet)' : '';
+    setStatus('Gespeichert: ' + data.path + note);
+    alert('Gespeichert:\n' + data.path +
+          (data.images_dir ? '\n\nBilder: ' + data.images_dir : '') +
+          (skipped.length ? '\n\nAusgeblendet und daher nicht enthalten: ' + skipped.join(', ') : ''));
+  } catch (err) {
+    alert('Fehler beim Speichern:\n\n' + err.message);
+    setStatus('Fehler: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Kennungen der eigenen Oberfläche, einmal beim ersten Bedarf erfasst – bevor
+// irgendein fremder Inhalt im Dokument steht.
+let APP_IDS = null;
+function appIds() {
+  if (!APP_IDS) APP_IDS = new Set(Array.from(document.querySelectorAll('[id]'), el => el.id));
+  return APP_IDS;
 }
 
 // Minimaler HTML-Sanitizer: entfernt <script>, on*-Handler und javascript:-URLs.
@@ -1021,7 +2001,9 @@ function sanitizeHtml(html) {
   let el;
   while ((el = walker.nextNode())) {
     const tag = el.tagName.toLowerCase();
-    if (tag === 'script' || tag === 'iframe' || tag === 'object' || tag === 'embed' || tag === 'link' || tag === 'meta') {
+    // <base> würde alle relativen Links der Seite umbiegen.
+    if (tag === 'script' || tag === 'iframe' || tag === 'object' || tag === 'embed' || tag === 'link' ||
+        tag === 'meta' || tag === 'base' || tag === 'frame' || tag === 'frameset') {
       toRemove.push(el);
       continue;
     }
@@ -1029,7 +2011,12 @@ function sanitizeHtml(html) {
       const n = attr.name.toLowerCase();
       const v = attr.value.trim().toLowerCase();
       if (n.startsWith('on')) el.removeAttribute(attr.name);
-      else if ((n === 'href' || n === 'src' || n === 'xlink:href') && v.startsWith('javascript:')) {
+      // Fremde Elemente dürfen keine Kennung der Oberfläche übernehmen –
+      // getElementById fände sonst z. B. ein eingeschleustes, angehaktes
+      // "allowRemote". name="…" überschreibt sogar document.getElementById.
+      else if (n === 'name' || (n === 'id' && appIds().has(attr.value))) el.removeAttribute(attr.name);
+      else if ((n === 'href' || n === 'src' || n === 'xlink:href' || n === 'action' || n === 'formaction') &&
+               v.replace(/[\s\x00-\x1f]+/g, '').startsWith('javascript:')) {
         el.removeAttribute(attr.name);
       }
     }
@@ -1054,10 +2041,15 @@ function escapeHtml(s) {
 }
 
 // ── Inhaltsverzeichnis ──
+// Einträge mit ihrem Ziel – für die Markierung des aktuellen Abschnitts.
+let tocEntries = [];
+
 function buildToc(container) {
   const headings = container.querySelectorAll('h1, h2, h3');
   const tocLinks = document.getElementById('tocLinks');
   tocLinks.innerHTML = '';
+  tocEntries = [];
+  document.getElementById('tocCodeOpt').style.display = 'none';
 
   if (headings.length < 2) {
     document.getElementById('toc').classList.add('hidden');
@@ -1066,23 +2058,71 @@ function buildToc(container) {
 
   let id = 0;
   headings.forEach(h => {
-    const level = h.tagName.toLowerCase();
     if (!h.id) h.id = 'heading-' + (id++);
-    const a = document.createElement('a');
-    a.className = `toc-item ${level}`;
-    a.href = '#' + h.id;
-    a.textContent = h.textContent;
-    a.onclick = e => {
-      e.preventDefault();
-      h.scrollIntoView({ behavior: 'smooth' });
-      document.querySelectorAll('.toc-item').forEach(x => x.classList.remove('active'));
-      a.classList.add('active');
-    };
-    tocLinks.appendChild(a);
+    addTocEntry(h.textContent, 'toc-item ' + h.tagName.toLowerCase(), h);
   });
 
   document.getElementById('toc').classList.remove('hidden');
+  updateTocActive();
 }
+
+function addTocEntry(text, cls, target) {
+  const a = document.createElement('a');
+  a.className = cls;
+  a.href = '#';
+  a.textContent = text;
+  a.title = text;
+  a.onclick = e => {
+    e.preventDefault();
+    revealInNotebook(target);
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setTocActive(a);
+  };
+  document.getElementById('tocLinks').appendChild(a);
+  tocEntries.push({ a: a, target: target });
+}
+
+function setTocActive(a) {
+  tocEntries.forEach(e => e.a.classList.toggle('active', e.a === a));
+  // Den markierten Eintrag im Verzeichnis selbst sichtbar halten.
+  if (a && a.scrollIntoView) a.scrollIntoView({ block: 'nearest' });
+}
+
+// Aktiv ist der letzte Eintrag, dessen Ziel oben schon erreicht ist. Ein Ziel
+// in einem eingeklappten Teil hat keine Lage – dann zählt seine Zelle.
+function updateTocActive() {
+  if (!tocEntries.length) return;
+  // Im Screenshot-Modus ist die Ansicht versteckt; alles läge dann bei 0.
+  if (document.getElementById('output').style.display === 'none') return;
+  const wrap = document.getElementById('contentWrap');
+  const top = wrap.getBoundingClientRect().top + 80;
+  let current = tocEntries[0];
+  for (const e of tocEntries) {
+    const el = tocMeasureElement(e.target);
+    if (!el) continue;   // ausgeblendet – hat keine Lage
+    if (el.getBoundingClientRect().top <= top) current = e;
+    else break;
+  }
+  if (!current.a.classList.contains('active')) setTocActive(current.a);
+}
+
+// Wo ein Ziel tatsächlich steht: In einem gekürzten Teil meldet eine
+// abgeschnittene Überschrift ihre ungekürzte Lage – dann zählt der Teil.
+// In einem eingeklappten Teil hat das Ziel gar keine Lage – dann die Zelle.
+function tocMeasureElement(target) {
+  let el = target;
+  const clamped = target.closest('.nb-clamped');
+  if (clamped && clamped !== target) el = clamped;
+  if (el.offsetParent === null) el = el.closest('.nb-cell') || el;
+  return el.getClientRects().length ? el : null;
+}
+
+let tocSpyPending = false;
+document.getElementById('contentWrap').addEventListener('scroll', () => {
+  if (tocSpyPending) return;
+  tocSpyPending = true;
+  requestAnimationFrame(() => { tocSpyPending = false; updateTocActive(); });
+});
 
 function toggleToc() {
   document.getElementById('toc').classList.toggle('hidden');
@@ -1106,6 +2146,7 @@ function doSearch(term) {
   searchMatches = Array.from(document.querySelectorAll('.highlight'));
   searchIndex = 0;
   if (searchMatches.length > 0) {
+    revealInNotebook(searchMatches[0]);
     searchMatches[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
     updateStatus();
   }
@@ -1121,7 +2162,9 @@ function highlightText(node, term) {
       node.replaceWith(span);
     }
   } else if (node.nodeType === Node.ELEMENT_NODE &&
-             !['SCRIPT','STYLE','CODE','PRE'].includes(node.tagName)) {
+             !['SCRIPT','STYLE','CODE','PRE','BUTTON'].includes(node.tagName) &&
+             !node.classList.contains('nb-fold-summary') &&
+             !node.matches('.nb-doc.hide-out .nb-output, .nb-doc.hide-code .nb-input')) {
     Array.from(node.childNodes).forEach(child => highlightText(child, term));
   }
 }
@@ -1131,6 +2174,7 @@ function searchNav(e) {
     searchMatches[searchIndex].classList.remove('current');
     searchIndex = (searchIndex + (e.shiftKey ? -1 : 1) + searchMatches.length) % searchMatches.length;
     searchMatches[searchIndex].classList.add('current');
+    revealInNotebook(searchMatches[searchIndex]);
     searchMatches[searchIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
     updateStatus();
     e.preventDefault();
@@ -2379,7 +3423,7 @@ async function convertShots() {
 // damit die Screenshots schon vor dem Speichern sichtbar sind.
 function previewShots() {
   const md = document.getElementById('mdEditor').value;
-  let html = marked.parse(md);
+  let html = renderMd(md);
   allImages().forEach(img => {
     html = html.split('"' + IMG_DIR + '/' + img.file + '"').join('"' + img.dataUrl + '"');
   });
@@ -2645,6 +3689,7 @@ function clearViewer() {
   output.innerHTML = '';
   output.style.display = 'none';
   document.getElementById('dropzone').style.display = 'flex';
+  currentNb = null;
 
   // Suche zurücksetzen – sonst zeigen Treffer auf entfernte Knoten.
   searchMatches = [];
@@ -2655,6 +3700,8 @@ function clearViewer() {
   // Inhaltsverzeichnis und Kopfzeile in den Ausgangszustand.
   document.getElementById('tocLinks').innerHTML = '';
   document.getElementById('toc').classList.add('hidden');
+  document.getElementById('tocCodeOpt').style.display = 'none';
+  tocEntries = [];
   document.getElementById('filepath').textContent = 'Datei öffnen oder Markdown hierher ziehen';
   document.title = 'Markdown Viewer';
 
@@ -2683,6 +3730,9 @@ document.addEventListener('keydown', e => {
 </body>
 </html>
 """
+
+# Die Seite einmal mit eingesetzter Versionsnummer, so wie sie ausgeliefert wird.
+PAGE = HTML.replace("__APP_VERSION__", APP_VERSION).encode("utf-8")
 
 
 def _claude_headers():
@@ -3416,7 +4466,7 @@ def import_docx(raw):
 _dialog_requests = queue.Queue()
 
 
-def ask_save_path():
+def ask_save_path(initialfile="screenshots.md"):
     """Oeffnet den nativen Speichern-Dialog. Nur im Hauptthread aufrufen."""
     import tkinter as tk
     from tkinter import filedialog
@@ -3432,17 +4482,17 @@ def ask_save_path():
             parent=root,
             title="Markdown speichern",
             defaultextension=".md",
-            initialfile="screenshots.md",
+            initialfile=initialfile,
             filetypes=[("Markdown", "*.md"), ("Alle Dateien", "*.*")],
         )
     finally:
         root.destroy()
 
 
-def request_save_path(timeout=600):
+def request_save_path(initialfile="screenshots.md", timeout=600):
     """Laesst den Dialog vom Hauptthread oeffnen und wartet auf das Ergebnis."""
     answer = queue.Queue(maxsize=1)
-    _dialog_requests.put(answer)
+    _dialog_requests.put((answer, initialfile))
     try:
         result = answer.get(timeout=timeout)
     except queue.Empty:
@@ -3499,13 +4549,13 @@ def pump_dialogs():
     """
     while True:
         try:
-            answer = _dialog_requests.get(timeout=0.25)
+            answer, initialfile = _dialog_requests.get(timeout=0.25)
         except queue.Empty:
             if should_quit():
                 return
             continue
         try:
-            answer.put(ask_save_path())
+            answer.put(ask_save_path(initialfile))
         except BaseException as e:
             answer.put(e)
 
@@ -3521,7 +4571,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if parsed.path == "/" or parsed.path == "/index.html":
             page_requested()
-            self._send(200, "text/html; charset=utf-8", HTML.encode())
+            self._send(200, "text/html; charset=utf-8", PAGE)
 
         elif parsed.path == "/api/status":
             # Sagt der Oberflaeche, welche Umwandlungswege hier verfuegbar sind.
@@ -3529,6 +4579,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "local_ocr": local_ocr_available(),
                 "has_key": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
                 "model": CLAUDE_MODEL,
+                "version": APP_VERSION,
             })
             self._send(200, "application/json; charset=utf-8", payload.encode())
 
@@ -3641,8 +4692,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Schreibt die .md-Datei und legt die Screenshots im Unterordner ab."""
         markdown = data.get("markdown", "")
         images = data.get("images") or []
+        # Vorschlag fuer den Dialog, z. B. der Notebook-Name. Nur der Dateiname,
+        # ohne Zeichen, die Windows in Dateinamen nicht erlaubt.
+        suggested = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_",
+                           os.path.basename(str(data.get("suggested_name") or ""))).strip()
+        if not suggested.lower().endswith(".md"):
+            suggested = "screenshots.md"
         try:
-            target = request_save_path()
+            target = request_save_path(suggested)
         except Exception as e:
             self._json(500, {"error": str(e)})
             return
@@ -3740,7 +4797,7 @@ def main():
             show_error(f"Port {PORT} ist von einem anderen Programm belegt - "
                        "der Markdown Viewer kann nicht starten.")
         return
-    print(f"Markdown Viewer startet auf {url}")
+    print(f"Markdown Viewer {APP_VERSION} startet auf {url}")
     if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         print("Hinweis: ANTHROPIC_API_KEY ist nicht gesetzt - "
               "'Screenshots/Text -> Markdown' laeuft lokal ueber die Windows-Texterkennung.")

@@ -13,6 +13,7 @@ test/
 Testdaten/*
 !Testdaten/Beispiel.md
 !Testdaten/Beispiel.ipynb
+!Testdaten/Notebook-Sonderfaelle.ipynb
 
 # Schlüssel und lokale Einstellungen
 .env
